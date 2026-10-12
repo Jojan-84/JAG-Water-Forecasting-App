@@ -1,0 +1,25 @@
+{
+  "model_name": "Linear Regression",
+  "features": [
+    "dow",
+    "month",
+    "lag_1",
+    "lag_7",
+    "roll_7",
+    "apt_avg"
+  ],
+  "unit": "m3 per day (1 m3 = 1000 liters)",
+  "target": "total water use of one apartment on the predicted day",
+  "train_period": [
+    "2020-01-07",
+    "2022-05-21"
+  ],
+  "cutoff_date": "2022-05-22",
+  "max_daily_seen_in_training_m3": 1.667,
+  "random_state": 42,
+  "test_metrics": {
+    "MAE": 0.02787349015343194,
+    "RMSE": 0.04797488849632255,
+    "R2": 0.8178292129810274
+  }
+}
