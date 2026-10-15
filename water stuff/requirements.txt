@@ -1,7 +1,0 @@
-streamlit>=1.50
-pandas==3.0.6
-numpy==2.5.3
-joblib
-altair
-# Replace with the exact versions printed by the last notebook cell, e.g. scikit-learn==1.5.2
-scikit-learn==1.9.1
