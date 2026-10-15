@@ -84,6 +84,10 @@ SHORT_DAYS = load_short_days()
 MAX_DAILY = float(info["max_daily_seen_in_training_m3"])
 TEST_MAE = float(info["test_metrics"]["MAE"])
 CUTOFF = pd.Timestamp(info["cutoff_date"])
+_test_rows = features_df[features_df["date"] >= CUTOFF]
+TEST_MEAN_USE = float(_test_rows["target"].mean()) if len(_test_rows) else float("nan")
+# Error grows with the size of the day (paper, Table VII), so the range shown is proportional to the forecast.
+TEST_REL_ERR = TEST_MAE / TEST_MEAN_USE if TEST_MEAN_USE and TEST_MEAN_USE > 0 else float("nan")
 
 
 # ----------------------------------------------------------------------------- display
@@ -99,16 +103,19 @@ def show_result(values, typical, target_date, actual=None, note=None):
 
     pred = F.predict_next_day(model, values, typical, target_date, MAX_DAILY)
     target = pd.Timestamp(target_date)
-    lo, hi = max(0.0, pred - TEST_MAE), pred + TEST_MAE
-
     c1, c2 = st.columns(2)
     c1.metric(f"Forecast for {target:%a %d %b %Y}", f"{pred * 1000:,.0f} L", help=f"{pred:.3f} m³")
-    c2.metric("Typical error", f"± {TEST_MAE * 1000:,.0f} L",
-              help="Average absolute error on days the model never saw during training.")
-    st.write(
-        f"Expected somewhere around **{lo * 1000:,.0f}–{hi * 1000:,.0f} L** ({pred:.3f} m³). "
-        "The error figure is an average, so any single day can be off by more."
-    )
+    c2.metric("Typical error (test set)", f"± {TEST_MAE * 1000:,.0f} L",
+              help="Average absolute error (MAE) on test-period days the model never saw during training, across all "
+                   "apartments.")
+    if np.isfinite(TEST_REL_ERR):
+        lo, hi = pred * (1 - TEST_REL_ERR), pred * (1 + TEST_REL_ERR)
+        st.write(
+            f"A rough range for this forecast is **{max(lo, 0) * 1000:,.0f}–{hi * 1000:,.0f} L**: the forecast "
+            f"± {TEST_REL_ERR:.0%}, which is the model's average miss as a share of an average test-period day. "
+            "This is not a statistical interval. Any single day can miss by more, and low-use apartments miss by a "
+            "larger share of their use."
+        )
     if typical > 0:
         diff = (pred / typical - 1) * 100
         st.caption(f"That is {abs(diff):.0f}% {'above' if diff >= 0 else 'below'} this apartment's "
@@ -138,7 +145,7 @@ def show_result(values, typical, target_date, actual=None, note=None):
         )
         .properties(height=300)
     )
-    st.altair_chart(chart, width="stretch")
+    show_chart(chart)
 
     with st.expander("Exactly what the model was given"):
         st.dataframe(F.make_feature_row(values, typical, target_date).rename(columns={
@@ -146,16 +153,12 @@ def show_result(values, typical, target_date, actual=None, note=None):
             "roll_7": "7-day average (m³)", "apt_avg": "apartment typical use (m³)"}), hide_index=True)
 
 
-def parse_text_values(text):
-    parts = [p for p in re.split(r"[,\s;]+", text.strip()) if p]
-    vals, bad = [], []
-    for p in parts:
-        try:
-            vals.append(float(p))
-        except ValueError:
-            bad.append(p)
-            vals.append(np.nan)
-    return vals, bad
+def show_chart(chart):
+    """Draw an Altair chart; newer Streamlit uses width='stretch', older releases use use_container_width."""
+    try:
+        st.altair_chart(chart, width="stretch")
+    except TypeError:
+        st.altair_chart(chart, use_container_width=True)
 
 
 # ----------------------------------------------------------------------------- sidebar
@@ -236,12 +239,12 @@ with tab_own:
                                     min_value=features_df["date"].min().date(),
                                     max_value=(features_df["date"].max() + pd.Timedelta(days=365)).date(),
                                     key="own_date", help="The model uses only the weekday and the month of this date.")
-        parsed, bad = parse_text_values(text)
+        parsed, bad = F.parse_text_values(text)
         if bad:
             st.error("These entries are not numbers: " + ", ".join(f"`{b}`" for b in bad)
-                     + ". Use a dot for decimals.")
+                     + ". Use a dot for decimals (0.08, not 0,08) and separate the days with commas or spaces.")
         elif not parsed:
-            st.error("Please enter 7 daily totals.")
+            st.error("Daily totals cannot be empty. Please provide exactly 7 daily totals (oldest first).")
         else:
             values_m3, ready = [v * scale for v in parsed], True
     else:
@@ -265,26 +268,30 @@ with tab_own:
                             f"forecasting {target_date:%d %b %Y}.")
 
     source = st.selectbox("Apartment's typical daily use", [
-        "Average of the 7 days above", "A recorded apartment's long-run average", "Type my own"])
+        "A recorded apartment's training-period average",
+        "Type my own",
+        "Average of the 7 days above (approximation)"])
     typical = None
-    if source == "Average of the 7 days above":
-        if ready and not any(pd.isna(values_m3)):
-            typical = float(np.mean(values_m3))
-    elif source == "A recorded apartment's long-run average":
+    if source.startswith("A recorded"):
         pick = st.selectbox("Apartment", sorted(baselines), key="own_apt")
         typical = float(baselines[pick])
         st.caption(f"{pick}: {typical:.3f} m³ ({typical * 1000:,.0f} L) per day over the training period.")
-    else:
+    elif source == "Type my own":
         entered = st.number_input(f"Typical daily use ({unit})", min_value=0.0, value=None, step=0.01 if unit == "m³" else 10.0)
         typical = None if entered is None else entered * scale
+    elif ready:
+        finite = [v for v in values_m3 if np.isfinite(v)]
+        typical = float(np.mean(finite)) if finite else 0.0   # bad entries are reported by the 7-day check itself
+        st.caption("The model was trained with each apartment's long-run average here. Using the last 7 days instead "
+                   "makes the forecast lean even more on recent days.")
 
     if ready:
-        if typical is None and source != "Average of the 7 days above":
+        if typical is None:
             st.info("Enter the typical daily use to see a forecast.")
         else:
-            show_result(values_m3, typical if typical is not None else np.nan, target_date,
-                        note="The typical-use figure here is an approximation of the training feature, "
-                             "which was each apartment's running average.")
+            show_result(values_m3, typical, target_date,
+                        note="In training, 'typical use' was each apartment's running average of all earlier days; "
+                             "the figure used here is an approximation of it.")
 
 # ---- Tab 3: explanation ---------------------------------------------------------
 with tab_how:
@@ -304,7 +311,8 @@ with tab_how:
              "The ± figure is the model's average miss on days it never trained on.")
     st.subheader("Limits")
     st.markdown(
-        "- Values far above anything in the training data are rejected, as are negative or empty entries.\n"
+        "- Empty or non-numeric entries, a wrong number of days, negative values, and totals above 1.5 times the largest "
+        "day seen in training (about 2.5 m³; usually a liters-typed-as-m³ mistake) are rejected with a message.\n"
         "- Accuracy differs between apartments; low-use apartments are harder to predict in relative terms.\n"
         "- Forecasts for dates outside the data's seasons rely on the model's month effects and are less reliable."
     )
