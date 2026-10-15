@@ -82,29 +82,58 @@ def validate_inputs(values, typical, max_daily):
     errors, warnings = [], []
     arr = np.array([np.nan if v is None else v for v in values], dtype=float)
 
+    limit = max_daily * 1.5   # paper, Section II-H: 1.5 x the largest daily total seen in training (about 2.5 m3)
+
+    # The wording below is the one quoted in the paper (Table VIII, Appendix C) and used by the notebook.
     if len(arr) != 7:
-        errors.append(f"Exactly 7 daily totals are needed (oldest first); got {len(arr)}.")
+        errors.append(f"Please provide exactly 7 daily totals (oldest first); you gave {len(arr)}.")
     elif np.isnan(arr).any() or np.isinf(arr).any():
-        errors.append("Daily totals cannot be empty or non-numeric.")
+        errors.append("Daily totals cannot be empty (and must be numbers).")
     else:
         if (arr < 0).any():
             errors.append("Water use cannot be negative.")
-        limit = max_daily * 1.5
         if arr.max() > limit:
             errors.append(
-                f"A daily total of {arr.max():.2f} m3 is above {limit:.2f} m3, which is far outside anything seen "
-                "in the training data. Please check the units (m3, not liters)."
+                f"A daily total above {limit:.2f} m³ is far outside anything seen in the data "
+                f"(you entered {arr.max():.2f} m³); please check the units (m³, not liters)."
             )
         if (arr == 0).all():
             warnings.append("All 7 days are zero, so the forecast reflects an empty apartment.")
 
-    if typical is None or not np.isfinite(typical):
-        errors.append("The apartment's typical daily use is missing.")
-    elif typical < 0:
-        errors.append("Typical daily use cannot be negative.")
-    elif typical > max_daily * 1.5:
-        errors.append(f"Typical daily use of {typical:.2f} m3 is far outside the training data; check the units.")
+    # Only complain about the typical-use figure when the 7 totals themselves were usable,
+    # so one bad entry does not produce a second, confusing message.
+    if not errors or len(arr) == 7 and np.isfinite(arr).all():
+        if typical is None or not np.isfinite(typical):
+            errors.append("The apartment's typical daily use is missing.")
+        elif typical < 0:
+            errors.append("Typical daily use cannot be negative.")
+        elif typical > limit:
+            errors.append(f"Typical daily use above {limit:.2f} m³ is far outside the data; check the units (m³, not liters).")
     return errors, warnings
+
+
+def parse_text_values(text):
+    """Parse the typed list of daily totals. Returns (values, bad_tokens).
+
+    Blank entries between separators become NaN (so they are reported as 'cannot be empty' instead of being
+    silently dropped). Separators: semicolons or commas if present, otherwise whitespace.
+    """
+    text = (text or "").strip()
+    if not text:
+        return [], []
+    sep = ";" if ";" in text else ("," if "," in text else None)
+    parts = [p.strip() for p in text.split(sep)] if sep else text.split()
+    vals, bad = [], []
+    for p in parts:
+        if p == "":
+            vals.append(np.nan)
+            continue
+        try:
+            vals.append(float(p))
+        except ValueError:
+            bad.append(p)
+            vals.append(np.nan)
+    return vals, bad
 
 
 def make_feature_row(values, typical, target_date) -> pd.DataFrame:
